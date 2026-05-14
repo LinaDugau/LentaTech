@@ -1,0 +1,37 @@
+name: video-processing-ml
+
+services:
+  api:
+    build: .
+    container_name: video-processing-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./tmp:/app/tmp
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  ui:
+    build: .
+    container_name: video-processing-ui
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+    environment:
+      - API_URL=http://api:8000
+    command: streamlit run app/ui.py --server.port=8501 --server.address=0.0.0.0
+    restart: unless-stopped
+
+volumes:
+  tmp_data:
+    driver: local
