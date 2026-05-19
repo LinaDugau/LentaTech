@@ -1,37 +1,183 @@
-name: video-processing-ml
+name: lentatech-pricetag
 
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: pricetag-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+
   api:
     build: .
-    container_name: video-processing-api
+    container_name: pricetag-api
     ports:
       - "8000:8000"
+    depends_on:
+      - redis
     volumes:
+      # промежуточные файлы заданий (видео, csv, preview)
       - ./tmp:/app/tmp
+      # LLM-веса (Qwen 1.8 GB) — НЕ копируются в образ, монтируются как volume.
+      # Если файла нет — pipeline всё равно работает (product_name = пусто).
+      - ./ml/weights:/app/ml/weights
+      # output (треки, кропы, OCR-csv) — для отладки/persistence
+      - ./ml/output:/app/ml/output
+      # Каталог организаторов (cp1251, ;): положите db_hack.csv в корень репозитория
+      - ./db_hack.csv:/app/ml/data/db_hack.csv:ro
     environment:
+      # /app должен быть на PYTHONPATH — celery/uvicorn запускаются как
+      # /opt/venv/bin/* и без этого не видят корневые пакеты `ml`, `app`.
+      - PYTHONPATH=/app
       - API_HOST=0.0.0.0
       - API_PORT=8000
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      - API_PUBLIC_URL=http://localhost:8000
+      - LOG_LEVEL=INFO
+      - SENTRY_DSN=
+      - SENTRY_ENVIRONMENT=local
+      - ENABLE_WORKER_METRICS=0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - REDIS_PROGRESS_URL=redis://redis:6379/2
+      - WEBHOOK_TIMEOUT_SECONDS=5
+      - JOB_FILE_RETENTION_DAYS=7
+      - CLEANUP_INTERVAL_SECONDS=86400
+      - REPORTING_BACKEND=parquet
+      - CLICKHOUSE_DSN=
+      - GREENPLUM_DSN=
+      - DETECTOR_WEIGHTS_PATH=/app/ml/output/runs/pricetag_v2/weights/best.pt
+      - LLM_WEIGHTS_PATH=/app/ml/weights/qwen2.5-3b-q4_k_m.gguf
+      - CATALOG_PATH=/app/ml/data/db_hack.csv
+      - CATALOG_ENCODING=cp1251
+      - CATALOG_CSV_SEP=;
+      - ML_FRAME_STEP=3
+      - ML_TOP_K=3
+      - USE_PADDLE_OCR=1
+      - USE_AGGRESSIVE_DECODE=1
+      - MIN_FREE_DISK_BYTES=2147483648
+      - AUTH_ENABLED=0
+      - JWT_SECRET_KEY=change-me-in-production
+      - JWT_ACCESS_TOKEN_EXPIRE_MINUTES=720
+      - JWT_USERS={"admin":{"password":"admin","role":"admin"},"operator":{"password":"operator","role":"operator"},"viewer":{"password":"viewer","role":"viewer"}}
+      - RATE_LIMIT_ENABLED=1
+      - RATE_LIMIT_UPLOAD=5/minute
+      - RATE_LIMIT_LOGIN=10/minute
+      - MAX_VIDEO_DURATION_SECONDS=300
+      - MIN_VIDEO_WIDTH=320
+      - MIN_VIDEO_HEIGHT=240
+      - MAX_VIDEO_WIDTH=3840
+      - MAX_VIDEO_HEIGHT=2160
+      # USE_LLM=0 → отключить Qwen (быстрее, но без product_name)
+      - USE_LLM=1
+      # PyTorch/EasyOCR могут плодить worker'ов — ограничим для CPU-only
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
+    # ML модели нужно много RAM (EasyOCR ~1 GB, Qwen 1.8 GB)
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      # большой start_period — модели грузятся первые ~30-60 сек
+      start_period: 120s
+    restart: unless-stopped
+
+  worker:
+    build: .
+    container_name: pricetag-worker
+    depends_on:
+      - redis
+    ports:
+      - "9101:9101"
+    volumes:
+      # worker должен видеть те же job-файлы, веса и ML-output, что и API
+      - ./tmp:/app/tmp
+      - ./ml/weights:/app/ml/weights
+      - ./ml/output:/app/ml/output
+      # Каталог организаторов (cp1251, ;): положите db_hack.csv в корень репозитория
+      - ./db_hack.csv:/app/ml/data/db_hack.csv:ro
+    environment:
+      - PYTHONPATH=/app
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - REDIS_PROGRESS_URL=redis://redis:6379/2
+      - API_PUBLIC_URL=http://localhost:8000
+      - LOG_LEVEL=INFO
+      - SENTRY_DSN=
+      - SENTRY_ENVIRONMENT=local
+      - ENABLE_WORKER_METRICS=1
+      - PROMETHEUS_WORKER_PORT=9101
+      - WEBHOOK_TIMEOUT_SECONDS=5
+      - JOB_FILE_RETENTION_DAYS=7
+      - CLEANUP_INTERVAL_SECONDS=86400
+      - DETECTOR_WEIGHTS_PATH=/app/ml/output/runs/pricetag_v2/weights/best.pt
+      - LLM_WEIGHTS_PATH=/app/ml/weights/qwen2.5-3b-q4_k_m.gguf
+      - CATALOG_PATH=/app/ml/data/db_hack.csv
+      - CATALOG_ENCODING=cp1251
+      - CATALOG_CSV_SEP=;
+      - ML_FRAME_STEP=3
+      - ML_TOP_K=3
+      - USE_PADDLE_OCR=1
+      - USE_AGGRESSIVE_DECODE=1
+      - USE_LLM=1
+      # Paddle вызывается в subprocess с OMP=1; здесь можно держать потоки для YOLO/EasyOCR
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
+    deploy:
+      resources:
+        limits:
+          # YOLO + видео + EasyOCR/Paddle/агрессивный decode легко выходят за 8G → OOM/SIGKILL
+          memory: 16G
+    command: celery -A app.queue worker --concurrency=1 --loglevel=info
+    restart: unless-stopped
+
+  beat:
+    build: .
+    container_name: pricetag-beat
+    depends_on:
+      - redis
+    volumes:
+      # beat читает SQLite и ставит периодическую задачу очистки в Redis
+      - ./tmp:/app/tmp
+    environment:
+      - PYTHONPATH=/app
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - LOG_LEVEL=INFO
+      - SENTRY_DSN=
+      - SENTRY_ENVIRONMENT=local
+      - ENABLE_WORKER_METRICS=0
+      - PROMETHEUS_WORKER_PORT=9101
+      - JOB_FILE_RETENTION_DAYS=7
+      - CLEANUP_INTERVAL_SECONDS=86400
+    command: celery -A app.queue beat --loglevel=info
     restart: unless-stopped
 
   ui:
     build: .
-    container_name: video-processing-ui
+    container_name: pricetag-ui
     ports:
       - "8501:8501"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     environment:
+      - PYTHONPATH=/app
       - API_URL=http://api:8000
+      - API_TOKEN=
     command: streamlit run app/ui.py --server.port=8501 --server.address=0.0.0.0
     restart: unless-stopped
 
 volumes:
   tmp_data:
+    driver: local
+  redis_data:
     driver: local
