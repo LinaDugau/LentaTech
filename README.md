@@ -143,13 +143,6 @@ YOLOv8, EasyOCR, PaddleOCR, pyzbar, zxing-cpp, llama-cpp-python, FastAPI, Celery
 
 ---
 
-## Документы
-
-- [DOCKER_RUN.md](DOCKER_RUN.md) — env, локальный запуск, Qwen weights
-- [PRESENTATION_NOTES.md](PRESENTATION_NOTES.md) — текст презентации
-
----
-
 ## Лицензия
 
 Pre-trained веса (YOLOv8, Qwen, EasyOCR) — под лицензиями 
