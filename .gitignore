@@ -28,6 +28,7 @@ ENV/
 # IDE
 .vscode/
 .idea/
+*.code-workspace
 *.swp
 *.swo
 *~
@@ -63,7 +64,11 @@ lentatech-backup/
 db_hack.csv
 
 # Каталоги (регенерируются build_hybrid_catalog.py)
-ml/data/lenta_catalog_hybrid.parquet
+ml/data/lenta_catalog*.parquet
+
+# Barcode strip datasets (локальные эксперименты)
+ml/data/barcode_strips/
+ml/data/barcode_strips_external/
 
 # Отладка датасета
 ml/data/_gt_inspect/
@@ -100,14 +105,24 @@ ml/scripts/_backup_*/
 # Экспериментальные веса (не production)
 ml/models/*.pt
 
-# Barcode strips — реген: build_barcode_strip_dataset.py
-ml/data/barcode_strips/strips/
+# Barcode strips — локальные датасеты
+ml/data/barcode_strips_merged/
+ml/data/barcode_strips_pretrain/
+ml/data/external_barcode/
 
-# Старые версии YOLO
+# Старые / экспериментальные версии YOLO
 ml/output/runs/pricetag_v1/
 ml/output/runs/pricetag_v3/
+ml/output/runs/pricetag_v4/
 ml/output/runs/pricetag_v5/
+ml/output/runs/pricetag_v5b/
 ml/output/runs/_backup/
+
+# Промежуточные индексы (регенерируются)
+ml/output/frames_index.csv
+ml/output/pseudo_summary.csv
+ml/output/video_meta.csv
+ml/output/debug_*.jpg
 
 # YOLO training viz
 ml/output/runs/*/*.png
@@ -127,6 +142,13 @@ ml/output/runs/*/weights/last.pt
 yolov8s-worldv2.pt
 yolov8s.pt
 yolov8n.pt
+
+# Локальные отчёты и журналы (не в git)
+ml/DAY*_REPORT.md
+ml/DAY*_STABILIZATION*.md
+ml/FINAL*.md
+ml/BACKEND_HANDOFF.md
+ml/CATALOG_AND_EVAL_NOTE.md
 
 # ! Финальный submission (исключение)
 !ml/submission/

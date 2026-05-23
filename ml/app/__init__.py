@@ -1,1 +1,0 @@
-"""Video processing application package."""

@@ -78,7 +78,7 @@ def _check_llm_weights() -> Dict[str, Any]:
         "ok": weights_present,
         "weights_present": weights_present,
         "weights_path": str(LLM_WEIGHTS_PATH),
-        "message": "LLM weights found" if weights_present else "LLM weights missing; product_name enrichment will be skipped",
+        "message": "LLM weights found" if weights_present else "LLM weights missing",
     }
 
 

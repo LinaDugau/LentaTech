@@ -35,6 +35,7 @@ FROM python:3.10-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     VIRTUAL_ENV=/opt/venv \
+    EASYOCR_MODEL_DIR=/opt/easyocr \
     PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
@@ -60,10 +61,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /opt/venv /opt/venv
 
-# PaddleOCR подтягивает детектор/распознаватель при первом создании объекта.
-# Кэшируем модели на этапе сборки, чтобы inference в контуре не зависел от сети.
+# OCR-библиотеки подтягивают модели при первом создании объектов.
+# Кэшируем их на этапе сборки, чтобы inference в контуре не зависел от сети.
 RUN python - <<'PY'
+import os
+import easyocr
 from paddleocr import PaddleOCR
+
+try:
+    easyocr.Reader(
+        ["ru", "en"],
+        gpu=False,
+        verbose=False,
+        model_storage_directory=os.environ["EASYOCR_MODEL_DIR"],
+    )
+except Exception as exc:
+    print(f"WARNING: EasyOCR model prefetch failed: {exc}")
 PaddleOCR(
     use_doc_orientation_classify=False,
     use_doc_unwarping=False,
@@ -87,8 +100,5 @@ COPY ml/ ./ml/
 RUN mkdir -p /app/tmp/jobs
 
 EXPOSE 8000 8501 8502 9101
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
-    CMD curl -fsS http://localhost:8000/ || exit 1
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

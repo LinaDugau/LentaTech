@@ -3,12 +3,14 @@ import os
 import io
 import base64
 import html
+import json
 from pathlib import Path
 import tempfile
 
 import cv2
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 from PIL import Image
 
@@ -16,7 +18,11 @@ from app.config import MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_MB
 
 API_URL = os.getenv("API_URL", "http://localhost:8000")
 DEFAULT_USER_ID = "anonymous"
+ACTIVE_JOB_ID_KEY = "active_job_id"
 COMPLETED_JOB_ID_KEY = "completed_job_id"
+JOB_QUERY_PARAM = "job_id"
+RESTORE_CHECKED_QUERY_PARAM = "_restore_checked"
+LOCAL_STORAGE_JOB_ID_KEY = "shelfvision:last_job_id"
 PRICE_COLUMNS = ["price_default", "price_card", "price_discount"]
 COMPARE_KEY_COLUMNS = ["id_sku", "barcode"]
 MANDATORY_COLUMNS = [
@@ -38,6 +44,7 @@ st.set_page_config(
 
 def main():
     hide_sidebar()
+    restore_job_from_query_params()
 
     st.title("ShelfVision")
     st.markdown("Загрузите видео для обнаружения и распознавания товаров с помощью ML")
@@ -60,13 +67,161 @@ def main():
         is_too_large = display_uploaded_video_info(uploaded_file)
         if st.button("Начать обработку", type="primary", disabled=is_too_large):
             st.session_state.pop(COMPLETED_JOB_ID_KEY, None)
-            completed_job_id = process_video(uploaded_file)
-            if completed_job_id:
-                st.session_state[COMPLETED_JOB_ID_KEY] = completed_job_id
+            job_id = upload_video(uploaded_file)
+            if job_id:
+                set_current_job(job_id)
+                st.rerun()
 
+    active_job_id = st.session_state.get(ACTIVE_JOB_ID_KEY)
     completed_job_id = st.session_state.get(COMPLETED_JOB_ID_KEY)
-    if completed_job_id:
+
+    if active_job_id:
+        render_job_status(active_job_id)
+    elif completed_job_id:
         display_results(completed_job_id)
+
+
+def restore_job_from_query_params():
+    job_id = st.query_params.get(JOB_QUERY_PARAM)
+    if isinstance(job_id, list):
+        job_id = job_id[0] if job_id else None
+
+    if job_id:
+        if st.session_state.get(ACTIVE_JOB_ID_KEY) != job_id:
+            st.session_state[ACTIVE_JOB_ID_KEY] = job_id
+        persist_job_id_to_local_storage(job_id)
+        return
+
+    if not job_id and RESTORE_CHECKED_QUERY_PARAM not in st.query_params:
+        restore_job_id_from_local_storage()
+        st.query_params[RESTORE_CHECKED_QUERY_PARAM] = "1"
+        return
+
+    if st.session_state.get(ACTIVE_JOB_ID_KEY) or st.session_state.get(COMPLETED_JOB_ID_KEY):
+        return
+
+    latest_active_job_id = find_latest_active_job_id(DEFAULT_USER_ID)
+    if latest_active_job_id:
+        set_current_job(latest_active_job_id)
+
+
+def set_current_job(job_id: str):
+    st.session_state[ACTIVE_JOB_ID_KEY] = job_id
+    st.session_state.pop(COMPLETED_JOB_ID_KEY, None)
+    st.query_params[JOB_QUERY_PARAM] = job_id
+    if RESTORE_CHECKED_QUERY_PARAM in st.query_params:
+        del st.query_params[RESTORE_CHECKED_QUERY_PARAM]
+    persist_job_id_to_local_storage(job_id)
+
+
+def clear_current_job():
+    st.session_state.pop(ACTIVE_JOB_ID_KEY, None)
+    st.session_state.pop(COMPLETED_JOB_ID_KEY, None)
+    if JOB_QUERY_PARAM in st.query_params:
+        del st.query_params[JOB_QUERY_PARAM]
+    if RESTORE_CHECKED_QUERY_PARAM in st.query_params:
+        del st.query_params[RESTORE_CHECKED_QUERY_PARAM]
+    clear_job_id_from_local_storage()
+
+
+def persist_job_id_to_local_storage(job_id: str):
+    storage_key = json.dumps(LOCAL_STORAGE_JOB_ID_KEY)
+    storage_value = json.dumps(job_id)
+    components.html(
+        f"""
+        <script>
+        try {{
+            window.parent.localStorage.setItem({storage_key}, {storage_value});
+        }} catch (error) {{
+            console.warn("Unable to persist ShelfVision job id", error);
+        }}
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def clear_job_id_from_local_storage():
+    storage_key = json.dumps(LOCAL_STORAGE_JOB_ID_KEY)
+    components.html(
+        f"""
+        <script>
+        try {{
+            window.parent.localStorage.removeItem({storage_key});
+        }} catch (error) {{
+            console.warn("Unable to clear ShelfVision job id", error);
+        }}
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def restore_job_id_from_local_storage():
+    storage_key = json.dumps(LOCAL_STORAGE_JOB_ID_KEY)
+    job_param = json.dumps(JOB_QUERY_PARAM)
+    checked_param = json.dumps(RESTORE_CHECKED_QUERY_PARAM)
+    components.html(
+        f"""
+        <script>
+        try {{
+            const storageKey = {storage_key};
+            const jobParam = {job_param};
+            const checkedParam = {checked_param};
+            const parentWindow = window.parent;
+            const url = new URL(parentWindow.location.href);
+            const storedJobId = parentWindow.localStorage.getItem(storageKey);
+
+            if (storedJobId) {{
+                url.searchParams.set(jobParam, storedJobId);
+                url.searchParams.delete(checkedParam);
+            }} else {{
+                url.searchParams.set(checkedParam, "1");
+            }}
+
+            parentWindow.location.replace(url.toString());
+        }} catch (error) {{
+            const url = new URL(window.parent.location.href);
+            url.searchParams.set({checked_param}, "1");
+            window.parent.location.replace(url.toString());
+        }}
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def find_latest_active_job_id(user_id: str) -> str | None:
+    try:
+        jobs = fetch_user_jobs(user_id, limit=20)
+    except requests.exceptions.RequestException:
+        return None
+
+    active_statuses = {"queued", "processing"}
+    for job in jobs:
+        job_id = job.get("id")
+        if job_id and job.get("status") in active_statuses and is_restorable_job(job_id):
+            return job_id
+    return None
+
+
+def is_restorable_job(job_id: str) -> bool:
+    try:
+        response = requests.get(f"{API_URL}/status/{job_id}", timeout=5)
+        if response.status_code != 200:
+            return False
+        return not is_stale_job_status(response.json())
+    except requests.exceptions.RequestException:
+        return False
+
+
+def is_stale_job_status(status_data: dict) -> bool:
+    status = str(status_data.get("status", "")).lower()
+    message = str(status_data.get("message", "")).lower()
+    return status in {"error", "revoked"} or "revoked" in message
 
 
 def hide_sidebar():
@@ -181,7 +336,7 @@ def extract_first_frame(uploaded_file):
                 pass
 
 
-def process_video(uploaded_file):
+def upload_video(uploaded_file):
     try:
         with st.spinner("Загрузка видео..."):
             files = {"file": (uploaded_file.name, uploaded_file.getvalue())}
@@ -193,49 +348,70 @@ def process_video(uploaded_file):
                 st.error(f"Ошибка загрузки: {response.json().get('detail', 'Неизвестная ошибка')}")
                 return None
             
-            job_id = response.json()["job_id"]
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        while True:
-            try:
-                response = requests.get(f"{API_URL}/status/{job_id}", timeout=10)
-                
-                if response.status_code != 200:
-                    st.error("Не удалось получить статус")
-                    break
-                
-                status_data = response.json()
-                status = status_data["status"]
-                progress = status_data["progress"]
-                message = status_data["message"]
-                
-                progress_bar.progress(progress / 100)
-                status_text.text(f"Статус: {status.upper()} - {message}")
-                
-                if status == "done":
-                    return job_id
-                elif status == "error":
-                    st.error(f"Ошибка обработки: {message}")
-                    return None
-
-                time.sleep(1.5)
-                
-            except (requests.exceptions.ConnectionError,
-                    requests.exceptions.Timeout,
-                    requests.exceptions.ChunkedEncodingError) as e:
-                # transient: API занят тяжёлой обработкой, retry без падения
-                status_text.text(f"Статус: соединение... ({e.__class__.__name__})")
-                time.sleep(3)
-                continue
-            except requests.exceptions.RequestException as e:
-                st.error(f"Ошибка соединения: {str(e)}")
-                return None
+            return response.json()["job_id"]
     
     except Exception as e:
         st.error(f"Ошибка: {str(e)}")
         return None
+
+
+def render_job_status(job_id: str):
+    st.header("Текущая обработка")
+    st.caption(f"Задача: `{job_id}`. Ссылка с этим job_id сохраняет прогресс после обновления страницы.")
+
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    try:
+        response = requests.get(f"{API_URL}/status/{job_id}", timeout=10)
+
+        if response.status_code != 200:
+            st.error("Не удалось получить статус задачи")
+            if st.button("Сбросить текущую задачу"):
+                clear_current_job()
+                st.rerun()
+            return
+
+        status_data = response.json()
+        if is_stale_job_status(status_data):
+            clear_current_job()
+            st.warning("Предыдущая задача была остановлена. Выберите видео и запустите обработку заново.")
+            st.rerun()
+
+        status = status_data["status"]
+        progress = int(status_data.get("progress", 0))
+        message = status_data.get("message", "")
+
+        progress_bar.progress(max(0, min(progress, 100)) / 100)
+        status_text.text(f"Статус: {status.upper()} - {message}")
+
+        if status == "done":
+            st.session_state[COMPLETED_JOB_ID_KEY] = job_id
+            st.session_state.pop(ACTIVE_JOB_ID_KEY, None)
+            display_results(job_id)
+            return
+
+        if status == "error":
+            st.error(f"Ошибка обработки: {message}")
+            if st.button("Сбросить текущую задачу"):
+                clear_current_job()
+                st.rerun()
+            return
+
+        time.sleep(1.5)
+        st.rerun()
+
+    except (requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ChunkedEncodingError) as e:
+        status_text.text(f"Статус: соединение... ({e.__class__.__name__})")
+        time.sleep(3)
+        st.rerun()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Ошибка соединения: {str(e)}")
+        if st.button("Сбросить текущую задачу"):
+            clear_current_job()
+            st.rerun()
 
 
 def display_results(job_id: str):

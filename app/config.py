@@ -20,7 +20,7 @@ LLM_WEIGHTS_PATH = Path(
 CATALOG_PATH = Path(
     os.getenv(
         "CATALOG_PATH",
-        str(BASE_DIR / "ml" / "data" / "lenta_catalog_merged.parquet"),
+        str(BASE_DIR / "db_hack.csv"),
     )
 )
 MIN_FREE_DISK_BYTES = int(os.getenv("MIN_FREE_DISK_BYTES", str(2 * 1024 * 1024 * 1024)))

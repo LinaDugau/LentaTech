@@ -19,18 +19,14 @@ services:
     depends_on:
       - redis
     volumes:
-      # промежуточные файлы заданий (видео, csv, preview)
       - ./tmp:/app/tmp
-      # LLM-веса (Qwen 1.8 GB) — НЕ копируются в образ, монтируются как volume.
-      # Если файла нет — pipeline всё равно работает (product_name = пусто).
+      - ./app:/app/app:ro
+      - ./ml:/app/ml:ro
       - ./ml/weights:/app/ml/weights
-      # output (треки, кропы, OCR-csv) — для отладки/persistence
       - ./ml/output:/app/ml/output
-      # Каталог организаторов (cp1251, ;): положите db_hack.csv в корень репозитория
-      - ./db_hack.csv:/app/ml/data/db_hack.csv:ro
+      - ./ml/data:/app/ml/data
+      - ./db_hack.csv:/app/db_hack.csv:ro
     environment:
-      # /app должен быть на PYTHONPATH — celery/uvicorn запускаются как
-      # /opt/venv/bin/* и без этого не видят корневые пакеты `ml`, `app`.
       - PYTHONPATH=/app
       - API_HOST=0.0.0.0
       - API_PORT=8000
@@ -50,13 +46,17 @@ services:
       - GREENPLUM_DSN=
       - DETECTOR_WEIGHTS_PATH=/app/ml/output/runs/pricetag_v2/weights/best.pt
       - LLM_WEIGHTS_PATH=/app/ml/weights/qwen2.5-3b-q4_k_m.gguf
-      - CATALOG_PATH=/app/ml/data/db_hack.csv
+      - CATALOG_PATH=/app/db_hack.csv
       - CATALOG_ENCODING=cp1251
       - CATALOG_CSV_SEP=;
       - ML_FRAME_STEP=3
       - ML_TOP_K=3
+      - ML_USE_TTA=1
+      # дообученные веса (если есть на диске)
+      - ML_ENSEMBLE_WEIGHTS=/app/ml/output/runs/pricetag_v4/weights/best.pt,/app/ml/output/runs/pricetag_v5b/weights/best.pt
       - USE_PADDLE_OCR=1
       - USE_AGGRESSIVE_DECODE=1
+      - USE_SUBMISSION_FINALIZE=1
       - MIN_FREE_DISK_BYTES=2147483648
       - AUTH_ENABLED=0
       - JWT_SECRET_KEY=change-me-in-production
@@ -98,12 +98,13 @@ services:
     ports:
       - "9101:9101"
     volumes:
-      # worker должен видеть те же job-файлы, веса и ML-output, что и API
       - ./tmp:/app/tmp
+      - ./app:/app/app:ro
+      - ./ml:/app/ml:ro
       - ./ml/weights:/app/ml/weights
       - ./ml/output:/app/ml/output
-      # Каталог организаторов (cp1251, ;): положите db_hack.csv в корень репозитория
-      - ./db_hack.csv:/app/ml/data/db_hack.csv:ro
+      - ./ml/data:/app/ml/data
+      - ./db_hack.csv:/app/db_hack.csv:ro
     environment:
       - PYTHONPATH=/app
       - CELERY_BROKER_URL=redis://redis:6379/0
@@ -120,13 +121,17 @@ services:
       - CLEANUP_INTERVAL_SECONDS=86400
       - DETECTOR_WEIGHTS_PATH=/app/ml/output/runs/pricetag_v2/weights/best.pt
       - LLM_WEIGHTS_PATH=/app/ml/weights/qwen2.5-3b-q4_k_m.gguf
-      - CATALOG_PATH=/app/ml/data/db_hack.csv
+      - CATALOG_PATH=/app/db_hack.csv
       - CATALOG_ENCODING=cp1251
       - CATALOG_CSV_SEP=;
       - ML_FRAME_STEP=3
       - ML_TOP_K=3
+      - ML_USE_TTA=1
+      # дообученные веса (если есть на диске)
+      - ML_ENSEMBLE_WEIGHTS=/app/ml/output/runs/pricetag_v4/weights/best.pt,/app/ml/output/runs/pricetag_v5b/weights/best.pt
       - USE_PADDLE_OCR=1
       - USE_AGGRESSIVE_DECODE=1
+      - USE_SUBMISSION_FINALIZE=1
       - USE_LLM=1
       # Paddle вызывается в subprocess с OMP=1; здесь можно держать потоки для YOLO/EasyOCR
       - OMP_NUM_THREADS=4
@@ -134,9 +139,11 @@ services:
     deploy:
       resources:
         limits:
-          # YOLO + видео + EasyOCR/Paddle/агрессивный decode легко выходят за 8G → OOM/SIGKILL
-          memory: 16G
+          # v2+v4+v5b+TTA + 720 tracks: нужно 20G+ (Docker Desktop → Settings → Memory)
+          memory: 24G
     command: celery -A app.queue worker --concurrency=1 --loglevel=info
+    healthcheck:
+      disable: true
     restart: unless-stopped
 
   beat:
@@ -159,6 +166,8 @@ services:
       - JOB_FILE_RETENTION_DAYS=7
       - CLEANUP_INTERVAL_SECONDS=86400
     command: celery -A app.queue beat --loglevel=info
+    healthcheck:
+      disable: true
     restart: unless-stopped
 
   ui:
@@ -169,11 +178,19 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    volumes:
+      - ./app:/app/app:ro
     environment:
       - PYTHONPATH=/app
       - API_URL=http://api:8000
       - API_TOKEN=
     command: streamlit run app/ui.py --server.port=8501 --server.address=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
 
 volumes:
